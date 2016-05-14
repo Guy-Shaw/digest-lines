@@ -1,0 +1,235 @@
+#! /usr/bin/perl -w
+    eval 'exec /usr/bin/perl -S $0 ${1+"$@"}'
+        if 0; #$running_under_some_shell
+
+# Filename: digest-lines
+# Brief: Prefix each line of a text file with a message digest ID number.
+#
+# Copyright (C) 2016 Guy Shaw
+# Written by Guy Shaw <gshaw@acm.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as
+# published by the Free Software Foundation; either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+=pod
+
+=begin description
+
+Prefix each line of a text file with a message digest ID number.
+
+Options
+-------
+--online
+means do not do two passes, and therefore do not
+format the ID numbers with right justification, because we do
+not know on the first pass how many ID numbers there will be.
+While operating online, lines can be transformed and printed
+immediately, and the input could be a potentially infinite
+stream.
+
+--unique
+means do not print lines that we have seen before.
+
+--raw
+means prefix each line with its actual message digest,
+rather than a small unique ID.  Usually, the much smaller IDs
+are all that is needed.
+
+=end description
+
+=cut
+
+require 5.0;
+use strict;
+use warnings;
+use Carp;
+use diagnostics;
+use Getopt::Long;
+use File::Spec::Functions;
+use Cwd qw(getcwd);             # Needed at least for explain_cwd()
+use Digest::SHA qw(sha1 sha512 sha1_hex sha512_hex);
+
+my $eprint_fh;
+my $dprint_fh;
+
+my $debug   = 0;
+my $verbose = 0;
+my $raw     = 0;
+my $online  = 0;
+my $unique  = 0;
+
+my @options = (
+    'debug'   => \$debug,
+    'verbose' => \$verbose,
+    'raw'     => \$raw,
+    'online'  => \$online,
+    'unique'  => \$unique,
+);
+
+#:subroutines:#
+
+# Decide how to direct eprint*() and dprint*() functions.
+# If STDOUT and STDERR are directed to the same "channel",
+# then eprint*() and dprint*() should be tied to the same file handle.
+#
+# Otherwise, buffering could cause a mix of STDOUT and STDERR to
+# be written out of order.
+#
+sub set_print_fh {
+    my @stdout_statv;
+    my @stderr_statv;
+    my $stdout_chan;
+    my $stderr_chan;
+
+    @stdout_statv = stat(*STDOUT);
+    @stderr_statv = stat(*STDERR);
+    $stdout_chan = join(':', @stdout_statv[0, 1, 6]);
+    $stderr_chan = join(':', @stderr_statv[0, 1, 6]);
+    if (!defined($eprint_fh)) {
+        $eprint_fh = ($stderr_chan eq $stdout_chan) ? *STDOUT : *STDERR;
+    }
+    if (!defined($dprint_fh)) {
+        $dprint_fh = ($stderr_chan eq $stdout_chan) ? *STDOUT : *STDERR;
+    }
+}
+
+sub eprint {
+    if (-t $eprint_fh) {
+        print {$eprint_fh} "\e[01;31m\e[K", @_, "\e[m\e[K";
+    }
+    else {
+        print {$eprint_fh} @_;
+    }
+}
+
+sub eprintf {
+    if (-t $eprint_fh) {
+        print  {$eprint_fh}  "\e[01;31m\e[K";
+        printf {$eprint_fh} @_;
+        print  {$eprint_fh}  "\e[m\e[K";
+    }
+    else {
+        printf {$eprint_fh} @_;
+    }
+}
+
+sub dprint {
+    print {$dprint_fh} @_ if ($debug);
+}
+
+sub dprintf {
+    printf {$dprint_fh} @_ if ($debug);
+}
+
+# Print all lines prefixed by their SHA512 digest
+#
+# No buffering required.  Inherently single-pass in nature.
+#
+sub digest_lines_raw {
+    my %seen_digest = ();
+
+    while (<>) {
+        chomp;
+        s{\r\z}{}msx;
+        my $digest = sha512_hex($_);
+        if ($unique) {
+            next if (defined($seen_digest{$digest}));
+            $seen_digest{$digest} = 1;
+        }
+        print $digest, ': ', $_, "\n";
+    }
+}
+
+# Print all lines prefixed by the short unique digest ID number.
+#
+# Single-pass, no buffering.  Unique digest numbers are generated
+# one the fly, and the format of the udid prefix is set with
+# a generous speculative budget.
+#
+sub digest_lines_udid_online {
+    my @unique_digest_list = ();
+    my %unique_digest_set  = ();
+    my @ref_count = ();
+
+    while (<>) {
+        chomp;
+        s{\r\z}{}msx;
+        my $digest = sha512_hex($_);
+        my $udid = $unique_digest_set{$digest};
+        next if ($unique && defined($udid));
+        if (!defined($udid)) {
+            $udid = scalar(@unique_digest_list);
+            push(@unique_digest_list, $digest);
+            $unique_digest_set{$digest} = $udid;
+            $ref_count[$udid] = 0;
+        }
+        printf "%7u: %s\n", $udid, $_;
+    }
+}
+
+# Print all lines prefixed by the short unique digest ID number.
+#
+# Inherently two-pass in nature.  Requires buffering, because
+# some of the information about the uniqueness of 'udid' numbers
+# is not known until all line have been read.
+#
+sub digest_lines_udid_2pass {
+    my @unique_digest_list = ();
+    my %unique_digest_set  = ();
+    my @ref_count = ();
+    my @save = ();
+
+    while (<>) {
+        chomp;
+        s{\r\z}{}msx;
+        my $digest = sha512_hex($_);
+        my $udid = $unique_digest_set{$digest};
+        next if ($unique && defined($udid));
+        if (!defined($udid)) {
+            $udid = scalar(@unique_digest_list);
+            push(@unique_digest_list, $digest);
+            $unique_digest_set{$digest} = $udid;
+            $ref_count[$udid] = 0;
+        }
+        my $rec = [ $udid, $_ ];
+        push(@save, $rec);
+        ++$ref_count[$udid];
+    }
+
+    my $max_udid = scalar(@unique_digest_list);
+    my $refc_fmt = sprintf('%%%uu', length($max_udid));
+    for my $rec (@save) {
+        my ($udid, $line) = @$rec;
+        printf "${refc_fmt} %s\n", $udid, $line;
+    }
+}
+
+#:options:#
+
+set_print_fh();
+
+GetOptions(@options) or exit 2;
+
+#:main:#
+
+if ($raw) {
+    digest_lines_raw();
+}
+elsif ($online) {
+    digest_lines_udid_online();
+}
+else {
+    digest_lines_udid_2pass();
+}
+
+exit 0;
