@@ -62,7 +62,7 @@ how many different variations there are.
 
 Of course, I could use `sort` and `uniq` to eliminate the duplicate
 lines.  But, that is not the same as seeing the history lines
-in their original order.  This methods retains the lines,
+in their original order.  This method retains the lines,
 in order, but adds the visual aid.
 
 ### Tip
