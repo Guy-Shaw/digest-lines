@@ -71,7 +71,11 @@ Sometimes, you run into lines that look the same,
 but differ only in white space, or in some other way that
 is difficult to see.  This will tell you definitely that
 such lines are different.  If the reason is still unclear,
-you can run `digest-lines | cat --show-all`.
+you can run
+
+```
+    digest-lines | cat --show-all
+```
 
 
 ####
